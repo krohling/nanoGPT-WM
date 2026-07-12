@@ -92,7 +92,7 @@ scripts/             ← gen_dgrl curation; (later) own data collection
 ```
 
 - Configs: argparse + dataclass defaults inline, nanoGPT style. No Hydra, no Lightning.
-- Dependencies: torch, numpy, huggingface_hub, pygame (play only), ipywidgets (notebook only).
+- Dependencies: torch, numpy, huggingface_hub, pillow + matplotlib (eval/visualization only), pygame (play only), ipywidgets (notebook only).
 - Total core code target: ~1,000 lines.
 
 ## Hero moment, de-risked
