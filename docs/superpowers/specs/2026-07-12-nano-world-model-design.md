@@ -110,6 +110,8 @@ scripts/             ← gen_dgrl curation; (later) own data collection
 - Tokenizer: original-vs-reconstruction grids; codebook usage histogram.
 - Dynamics: teacher-forced next-token accuracy and loss curves; open-loop real-vs-dream side-by-sides from identical prefix + action sequence (works offline via shipped held-out episodes); drift-over-horizon curves; **per-token-position loss heatmap** (shows "most tokens copy; the action-relevant patches are the hard ones").
 
+**Milestone review gate (tokenizer → WM):** after tokenizer training, work **pauses** for Kevin's qualitative review before any world-model training begins. Deliverable: render panels including (a) original-vs-reconstruction grids over diverse held-out frames, deliberately including hard cases (small orbs, enemies mid-chase, vulnerability power-up states, dense mazes); (b) codebook usage histogram; (c) per-pixel reconstruction error heatmaps; (d) if capacity is borderline, an 8×8-vs-16×16 token grid side-by-side comparison. WM training starts only on explicit sign-off.
+
 **Engineering sanity:**
 
 - Overfit-a-single-batch mode in both train scripts.
