@@ -64,6 +64,9 @@ class VectorQuantizerEMA(nn.Module):
 
     def forward(self, z):  # z: [B, D, H, W]
         B, D, H, W = z.shape
+        # fp32 throughout the VQ bookkeeping: under CUDA autocast z arrives as
+        # fp16, but codebook/EMA buffers are fp32 (and should stay fp32)
+        z = z.float()
         flat = z.permute(0, 2, 3, 1).reshape(-1, D)                     # [N, D]
         if self.training and not bool(self.initialized):
             self._reseed(flat.detach(), torch.ones(self.num_codes, dtype=torch.bool,
