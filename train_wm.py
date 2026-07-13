@@ -164,10 +164,11 @@ if __name__ == "__main__":
                     n += len(x)
             vl /= max(n, 1)
             print(f"step {step}: val loss {vl:.4f}", flush=True)
-            if vl < best or step == args.steps:
-                best = min(best, vl)
-                torch.save({"model": model.state_dict(), "config": asdict(cfg),
-                            "tokens_per_frame": K, "step": step, "val_loss": vl},
-                           out / "world_model.pt")
+            ckpt = {"model": model.state_dict(), "config": asdict(cfg),
+                    "tokens_per_frame": K, "step": step, "val_loss": vl}
+            if vl < best:      # world_model.pt is always the BEST val checkpoint
+                best = vl
+                torch.save(ckpt, out / "world_model.pt")
+            torch.save(ckpt, out / "world_model_last.pt")
             model.train()
     print("done")
