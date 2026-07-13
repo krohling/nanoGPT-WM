@@ -21,13 +21,20 @@ DEFAULT_DATASET_REPO = os.environ.get("NWM_DATASET_REPO",
                                       "kevin510/nano-world-model-chaser")
 
 
-def download(root="data/chaser", repo_id=None):
-    """Fetch the dataset from HuggingFace into `root`. Returns the local path."""
+def download(root="data/chaser", repo_id=None, episodes_only=False):
+    """Fetch the dataset from HuggingFace into `root`. Returns the local path.
+
+    episodes_only=True grabs just the 60 held-out test episodes (~24 MB) —
+    enough for rollout evals and playing in the dream with the published
+    checkpoints. The full download (~5.4 GB) is only needed for training.
+    """
     from huggingface_hub import snapshot_download
     repo_id = repo_id or DEFAULT_DATASET_REPO
     if not repo_id:
         raise SystemExit("Set NWM_DATASET_REPO or pass repo_id (see README).")
-    snapshot_download(repo_id=repo_id, repo_type="dataset", local_dir=root)
+    patterns = ["test_episodes/*"] if episodes_only else None
+    snapshot_download(repo_id=repo_id, repo_type="dataset", local_dir=root,
+                      allow_patterns=patterns)
     return Path(root)
 
 
