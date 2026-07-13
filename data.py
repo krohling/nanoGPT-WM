@@ -17,8 +17,8 @@ from torch.utils.data import Dataset
 
 FRAME_SHAPE = (64, 64, 3)
 
-# Finalized in Task 5 once the HF namespace is decided.
-DEFAULT_DATASET_REPO = os.environ.get("NWM_DATASET_REPO", "")
+DEFAULT_DATASET_REPO = os.environ.get("NWM_DATASET_REPO",
+                                      "kevin510/nano-world-model-chaser")
 
 
 def download(root="data/chaser", repo_id=None):
