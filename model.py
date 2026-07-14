@@ -244,10 +244,16 @@ class KVSampler:
                 k = torch.cat([self.kv[i][0], k], dim=2)
                 v = torch.cat([self.kv[i][1], v], dim=2)
             self.kv[i] = (k, v)
-            past = k.size(2) - s
-            mask = torch.ones(s, k.size(2), dtype=torch.bool,
-                              device=idx.device).tril_(diagonal=past)
-            y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+            if s == 1:
+                # a single new token may attend to everything in the cache
+                y = F.scaled_dot_product_attention(q, k, v)
+            else:
+                # multi-token prefill over a cache: is_causal=True would be
+                # wrong (mask must be offset by the cache length)
+                past = k.size(2) - s
+                mask = torch.ones(s, k.size(2), dtype=torch.bool,
+                                  device=idx.device).tril_(diagonal=past)
+                y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
             y = y.transpose(1, 2).contiguous().view(B, s, cfg.n_embd)
             x = x + blk.attn.resid_dropout(blk.attn.c_proj(y))
             x = x + blk.mlp(blk.ln_2(x))
