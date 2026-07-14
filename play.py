@@ -15,7 +15,7 @@ import torch
 
 import data as data_mod
 from eval import _crop_to_frames, load_models, to_uint8
-from model import FRAME_VOCAB
+from model import FRAME_VOCAB, KVSampler
 from train_wm import interleave
 
 # procgen's 15 discrete actions are (LEFT/RIGHT) x (DOWN/UP) combos + special
@@ -44,6 +44,7 @@ def main():
     a = ap.parse_args()
 
     tok, wm = load_models(a.tokenizer, a.wm, a.device)
+    sampler = KVSampler(wm.gpt)   # cached fast path; same distributions as wm.generate_frame
     K = tok.tokens_per_frame
     eps = data_mod.list_episodes(a.data)
     rng = np.random.default_rng()
@@ -79,7 +80,7 @@ def main():
         seq = _crop_to_frames(seq, K, a.seq_len - 1)
         ctx = torch.tensor(seq, device=a.device)[None]
         with torch.no_grad():
-            nxt = wm.generate_frame(ctx, act, tokens_per_frame=K, temperature=temp)
+            nxt = sampler.generate_frame(ctx, act, tokens_per_frame=K, temperature=temp)
         seq += [FRAME_VOCAB + act] + nxt[0].tolist()
         frame = to_uint8(tok.decode(nxt))[0]
         surf = pygame.surfarray.make_surface(np.transpose(frame, (1, 0, 2)))

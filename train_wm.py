@@ -45,7 +45,7 @@ if __name__ == "__main__":
     import torch
 
     import data as data_mod
-    from model import VQVAE, GPTConfig, WorldModel
+    from model import VOCAB_SIZE, VQVAE, GPTConfig, WorldModel
 
     p = argparse.ArgumentParser()
     p.add_argument("--data", required=True)
@@ -116,13 +116,14 @@ if __name__ == "__main__":
         return (torch.tensor(np.stack(xs), device=dev),
                 torch.tensor(np.stack(ys), device=dev))
 
-    cfg = GPTConfig(block_size=args.seq_len * (K + 1) - 1, n_layer=args.n_layer,
-                    n_head=args.n_head, n_embd=args.n_embd, dropout=args.dropout)
+    cfg = GPTConfig(vocab_size=VOCAB_SIZE, block_size=args.seq_len * (K + 1) - 1,
+                    n_layer=args.n_layer, n_head=args.n_head, n_embd=args.n_embd,
+                    dropout=args.dropout, bias=False)
     model = WorldModel(cfg).to(dev)
-    print(f"params: {sum(pm.numel() for pm in model.parameters()) / 1e6:.1f}M  "
-          f"block_size: {cfg.block_size}")
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd,
-                            betas=(0.9, 0.95))
+    print(f"block_size: {cfg.block_size}")
+    # nanoGPT's own optimizer setup: 2D params get weight decay, 1D don't
+    opt = model.gpt.configure_optimizers(args.wd, args.lr, (0.9, 0.95),
+                                         "cuda" if dev == "cuda" else "cpu")
     use_amp = dev == "cuda"
     scaler = torch.amp.GradScaler(dev, enabled=use_amp)
     autocast = (lambda: torch.amp.autocast("cuda")) if use_amp else contextlib.nullcontext

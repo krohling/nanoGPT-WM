@@ -1,15 +1,20 @@
 """nano-world-model: a VQ-VAE tokenizer and a GPT dynamics model.
 
 The tokenizer turns each 64x64 RGB frame into a small grid of discrete codes
-("the frame as 64 words"). The world model is a plain GPT over sequences of
-[action, frame tokens, action, frame tokens, ...] — nanoGPT whose text is a game.
+("the frame as 64 words"). The dynamics model is nanoGPT — literally: the
+transformer in nanogpt.py is vendored verbatim from Karpathy's repo and used
+unmodified. Everything world-model-specific lives here: what the vocabulary
+means (512 frame codes + 15 action tokens), the sampling loop that restricts
+frame generation to frame tokens, and an optional KV-cached fast path for
+real-time play.
 """
 import math
-from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from nanogpt import GPT, GPTConfig  # GPTConfig re-exported for train/eval/tests
 
 FRAME_VOCAB = 512      # tokenizer codebook size
 NUM_ACTIONS = 15       # procgen discrete action space
@@ -144,131 +149,126 @@ class VQVAE(nn.Module):
 
 
 # ----------------------------- world model ----------------------------------
-# A nanoGPT. The only differences from language modeling: the vocabulary mixes
-# frame codes (0..511) with action tokens (512..526), and the loss skips
-# positions whose target is an action (the model predicts the world, not the
-# player's mind).
-
-@dataclass
-class GPTConfig:
-    vocab_size: int = VOCAB_SIZE
-    block_size: int = 1040          # 16 frames x 64 tokens + 15 actions = 1039 (+1 slack)
-    n_layer: int = 8
-    n_head: int = 6
-    n_embd: int = 384
-    dropout: float = 0.0
-
-
-class CausalSelfAttention(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        assert cfg.n_embd % cfg.n_head == 0
-        self.n_head, self.n_embd = cfg.n_head, cfg.n_embd
-        self.attn = nn.Linear(cfg.n_embd, 3 * cfg.n_embd)
-        self.proj = nn.Linear(cfg.n_embd, cfg.n_embd)
-        self.dropout = cfg.dropout
-
-    def forward(self, x, past=None):
-        B, S, C = x.shape
-        q, k, v = self.attn(x).split(self.n_embd, dim=2)
-        q, k, v = (t.view(B, S, self.n_head, C // self.n_head).transpose(1, 2)
-                   for t in (q, k, v))
-        if past is not None:
-            pk, pv = past
-            k = torch.cat([pk, k], dim=2)
-            v = torch.cat([pv, v], dim=2)
-        drop = self.dropout if self.training else 0.0
-        if past is None:
-            y = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=drop)
-        else:
-            # queries are the S newest positions; each may attend to the whole
-            # cache plus its own prefix within the new block (offset causal mask)
-            past_len = k.shape[2] - S
-            mask = torch.ones(S, k.shape[2], dtype=torch.bool,
-                              device=q.device).tril(diagonal=past_len)
-            y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=drop)
-        y = y.transpose(1, 2).contiguous().view(B, S, C)
-        return self.proj(y), (k, v)
-
-
-class Block(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        self.ln1 = nn.LayerNorm(cfg.n_embd)
-        self.attn = CausalSelfAttention(cfg)
-        self.ln2 = nn.LayerNorm(cfg.n_embd)
-        self.mlp = nn.Sequential(
-            nn.Linear(cfg.n_embd, 4 * cfg.n_embd), nn.GELU(),
-            nn.Linear(4 * cfg.n_embd, cfg.n_embd), nn.Dropout(cfg.dropout))
-
-    def forward(self, x, past=None):
-        a, kv = self.attn(self.ln1(x), past)
-        x = x + a
-        x = x + self.mlp(self.ln2(x))
-        return x, kv
+# The dynamics model IS nanoGPT (see nanogpt.py — vendored, unmodified).
+# WorldModel is a thin wrapper that owns a GPT and adds the one thing a world
+# model needs beyond language modeling: generate_frame, which appends an
+# action token and samples the 64 tokens of the frame that action causes,
+# restricting the softmax to the frame vocabulary.
+#
+# Everything else is convention, not architecture:
+#   * vocab 0..511  = tokenizer codes, 512..526 = the 15 procgen actions
+#   * training targets put -1 at positions whose target is an action token —
+#     nanoGPT's own cross_entropy(ignore_index=-1) skips them (the model
+#     predicts the world, not the player's mind)
 
 
 class WorldModel(nn.Module):
+    """Verbatim nanoGPT + a frame-sampling loop."""
+
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self.wte = nn.Embedding(cfg.vocab_size, cfg.n_embd)
-        self.wpe = nn.Embedding(cfg.block_size, cfg.n_embd)
-        self.drop = nn.Dropout(cfg.dropout)
-        self.blocks = nn.ModuleList(Block(cfg) for _ in range(cfg.n_layer))
-        self.ln_f = nn.LayerNorm(cfg.n_embd)
-        self.head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
-        self.apply(self._init)
-
-    def _init(self, m):
-        if isinstance(m, nn.Linear):
-            nn.init.normal_(m.weight, std=0.02)
-            if m.bias is not None:
-                nn.init.zeros_(m.bias)
-        elif isinstance(m, nn.Embedding):
-            nn.init.normal_(m.weight, std=0.02)
+        self.gpt = GPT(cfg)
 
     def forward(self, idx, targets=None):
-        B, S = idx.shape
-        assert S <= self.cfg.block_size
-        x = self.drop(self.wte(idx) + self.wpe(torch.arange(S, device=idx.device)))
-        for blk in self.blocks:
-            x, _ = blk(x)
-        logits = self.head(self.ln_f(x))
-        loss = None
-        if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)),
-                                   targets.reshape(-1), ignore_index=-1)
-        return logits, loss
-
-    def forward_cached(self, idx_new, past):
-        """Incremental forward. past = (pos, [per-layer (k,v)]) or None."""
-        pos0, kvs = past if past is not None else (0, [None] * self.cfg.n_layer)
-        B, s = idx_new.shape
-        pos = torch.arange(pos0, pos0 + s, device=idx_new.device)
-        x = self.wte(idx_new) + self.wpe(pos)
-        new_kvs = []
-        for blk, kv in zip(self.blocks, kvs):
-            x, nkv = blk(x, past=kv)
-            new_kvs.append(nkv)
-        logits = self.head(self.ln_f(x))
-        return logits, (pos0 + s, new_kvs)
+        # NOTE nanoGPT semantics: with targets=None only the LAST position's
+        # logits are returned (inference optimization). Pass targets to get
+        # logits for every position.
+        return self.gpt(idx, targets)
 
     @torch.no_grad()
     def generate_frame(self, ctx, action, tokens_per_frame=64,
                        temperature=1.0, top_k=50):
         """Append an action token, then sample one full frame, token by token.
-        This is nanoGPT's generate(): the chain rule, 64 links long."""
+
+        This is nanoGPT's generate() with one twist: logits are restricted to
+        the frame vocabulary (an action can never appear inside a frame).
+        Each step re-runs the full forward — clear, correct, and ~10x slower
+        than KVSampler below, which computes the exact same distributions.
+        """
         dev = ctx.device
+        idx = torch.cat([ctx, torch.tensor([[FRAME_VOCAB + action]], device=dev)], 1)
+        for _ in range(tokens_per_frame):
+            idx_cond = idx if idx.size(1) <= self.cfg.block_size else \
+                idx[:, -self.cfg.block_size:]
+            logits, _ = self.gpt(idx_cond)             # [B, 1, vocab] (last pos)
+            logits = logits[:, -1, :FRAME_VOCAB] / max(temperature, 1e-6)
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float("Inf")
+            tok = torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
+            idx = torch.cat([idx, tok], dim=1)
+        return idx[:, -tokens_per_frame:]
+
+
+# ------------------- OPTIONAL: KV-cached sampling (fast path) ---------------
+# Skip this on first read — it contains no new ideas, only speed.
+#
+# nanoGPT's modules are stateless: attention computes q,k,v from the current
+# input and nothing else, so generating N tokens costs N full forward passes.
+# A KV cache remembers each layer's keys/values so every new token costs one
+# token's worth of compute. That state has no place in nanoGPT's forward()
+# signatures — and rather than subclass-and-override every method, KVSampler
+# drives the SAME vendored modules (same weights, same math) in a cached loop:
+# c_attn/c_proj/mlp/LayerNorms are called directly, only the orchestration
+# differs. Two subtleties the cache introduces (tests pin both):
+#   * position embeddings index from the cache length, not from 0
+#   * is_causal=True is wrong once queries and keys have different lengths —
+#     the mask must be a tril offset by the cache length
+# test_kv_sampler_matches_full_forward asserts logit equality with plain GPT.
+
+class KVSampler:
+    """KV-cached frame sampler over an (unmodified) nanogpt.GPT."""
+
+    def __init__(self, gpt):
+        self.gpt = gpt
+        self.reset()
+
+    def reset(self):
+        self.kv = [None] * len(self.gpt.transformer.h)
+        self.pos = 0
+
+    @torch.no_grad()
+    def forward(self, idx):
+        """Cached forward over new tokens idx [B, s]. Returns [B, s, vocab]."""
+        g, cfg = self.gpt.transformer, self.gpt.config
+        B, s = idx.shape
+        nh, hs = cfg.n_head, cfg.n_embd // cfg.n_head
+        pos = torch.arange(self.pos, self.pos + s, device=idx.device)
+        x = g.drop(g.wte(idx) + g.wpe(pos))
+        for i, blk in enumerate(g.h):
+            xa = blk.ln_1(x)
+            q, k, v = blk.attn.c_attn(xa).split(cfg.n_embd, dim=2)
+            q, k, v = (t.view(B, s, nh, hs).transpose(1, 2) for t in (q, k, v))
+            if self.kv[i] is not None:
+                k = torch.cat([self.kv[i][0], k], dim=2)
+                v = torch.cat([self.kv[i][1], v], dim=2)
+            self.kv[i] = (k, v)
+            past = k.size(2) - s
+            mask = torch.ones(s, k.size(2), dtype=torch.bool,
+                              device=idx.device).tril_(diagonal=past)
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+            y = y.transpose(1, 2).contiguous().view(B, s, cfg.n_embd)
+            x = x + blk.attn.resid_dropout(blk.attn.c_proj(y))
+            x = x + blk.mlp(blk.ln_2(x))
+        self.pos += s
+        return self.gpt.lm_head(g.ln_f(x))
+
+    @torch.no_grad()
+    def generate_frame(self, ctx, action, tokens_per_frame=64,
+                       temperature=1.0, top_k=50):
+        """Same contract (and same distributions) as WorldModel.generate_frame."""
+        dev = ctx.device
+        self.reset()
         seq = torch.cat([ctx, torch.tensor([[FRAME_VOCAB + action]], device=dev)], 1)
-        logits, past = self.forward_cached(seq, None)      # prefill
+        logits = self.forward(seq)                     # prefill the cache
         out = []
         for _ in range(tokens_per_frame):
-            lg = logits[:, -1, :FRAME_VOCAB] / max(temperature, 1e-6)  # frame vocab only
+            lg = logits[:, -1, :FRAME_VOCAB] / max(temperature, 1e-6)
             if top_k is not None:
-                kth = torch.topk(lg, top_k).values[..., -1, None]
-                lg = lg.masked_fill(lg < kth, float("-inf"))
-            tok = torch.multinomial(F.softmax(lg, dim=-1), 1)
+                v, _ = torch.topk(lg, min(top_k, lg.size(-1)))
+                lg[lg < v[:, [-1]]] = -float("Inf")
+            tok = torch.multinomial(F.softmax(lg, dim=-1), num_samples=1)
             out.append(tok)
-            logits, past = self.forward_cached(tok, past)
+            logits = self.forward(tok)                 # one cached step
         return torch.cat(out, dim=1)

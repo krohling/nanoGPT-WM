@@ -192,7 +192,9 @@ def main():
             x = torch.tensor(seq[:-1], device=a.device)[None]
             y = torch.tensor(make_targets(seq), device=a.device)[None]
             with torch.no_grad():
-                logits, _ = wm(x, None)
+                # nanoGPT returns full-sequence logits only when targets are
+                # given (else just the last position) — pass y, ignore its loss
+                logits, _ = wm(x, y)
             lt = torch.nn.functional.cross_entropy(
                 logits[0], y[0].clamp(min=0), reduction="none") * (y[0] >= 0)
             # realign so row t holds the CE of frame t's K tokens: seq position
