@@ -1,9 +1,9 @@
 # nano-world-model
 
-**A world model you can read in an afternoon and play inside.** ~900 lines of
-PyTorch train two small networks on offline gameplay from procgen **Chaser**,
-then hallucinate the game live from your keyboard — no game engine, every
-frame sampled from a GPT.
+**A world model you can read in an afternoon and play inside.** ~950 lines of
+PyTorch (plus a verbatim, unmodified copy of nanoGPT) train two small networks
+on offline gameplay from procgen **Chaser**, then hallucinate the game live
+from your keyboard — no game engine, every frame sampled from a GPT.
 
 ![real (top) vs dream (bottom) — green bar: real frames prime the model; red bar: pure hallucination](assets/rollout_ep0.gif)
 
@@ -43,13 +43,42 @@ Two models, one trick each:
 - **`VQVAE`** (`model.py`) — conv encoder/decoder with a vector-quantized
   bottleneck: each frame becomes 64 discrete tokens. The frame is now
   *language-shaped*.
-- **`WorldModel`** (`model.py`) — a decoder-only transformer, block-for-block
-  nanoGPT. Its "text" interleaves frame tokens with **action tokens** (one
-  shared 527-word vocab: 512 frame codes + 15 procgen actions). Each action
-  token sits *between the frame where it was pressed and the frame it causes*,
-  so sampling the next frame is: append action, sample 64 tokens. The loss is
-  masked so the model never predicts action tokens — actions are the player's
-  input, not part of the world's dynamics.
+- **`WorldModel`** (`model.py`) — **verbatim nanoGPT**. Not "inspired by":
+  `nanogpt.py` in this repo is Karpathy's `model.py`, vendored unchanged and
+  pinned to an upstream commit — diff it yourself. Its "text" interleaves
+  frame tokens with **action tokens** (one shared 527-word vocab: 512 frame
+  codes + 15 procgen actions). Each action token sits *between the frame where
+  it was pressed and the frame it causes*, so sampling the next frame is:
+  append action, sample 64 tokens. The loss is masked so the model never
+  predicts action tokens — and even that masking flows through nanoGPT's own
+  `cross_entropy(..., ignore_index=-1)`, untouched.
+
+### What exactly is nanoGPT here, and what isn't?
+
+```
+nanogpt.py   Karpathy's model.py, verbatim (MIT), pinned @ f08abb4.
+             Verify:  curl -s https://raw.githubusercontent.com/karpathy/nanoGPT/f08abb45bd2285627d17da16daea14dda7e7253e/model.py | diff - <(tail -n +11 nanogpt.py)
+model.py     everything world-model-specific:
+             - the VQ-VAE tokenizer
+             - WorldModel: a GPT + generate_frame() (nanoGPT's generate(),
+               restricted to the frame vocabulary)
+             - KVSampler: OPTIONAL speed path for real-time play
+```
+
+The training loop optimizes an unmodified nanoGPT; the entire "world model"
+lives in the config values and in what the tokens *mean*.
+
+**Sidebar — why is `KVSampler` separate?** nanoGPT's attention is stateless
+(`forward(x)` in, `y` out), so generating a frame costs 64 *full* forward
+passes. A KV cache needs two things that API doesn't offer: a way to pass
+cached keys/values in and get new ones out — and once queries and keys have
+different lengths, `is_causal=True` becomes silently wrong (the mask must be
+offset by the cache length). Rather than subclass nanoGPT and override every
+`forward`, `KVSampler` drives the *same vendored modules* (`c_attn`, `c_proj`,
+`mlp`, the LayerNorms — same weights, same math) in a cached loop. Two tests
+pin the claim: cached logits equal the full forward's, and with the same seed
+the fast and slow paths sample *identical* frames. Skip it on first read;
+`WorldModel.generate_frame` is the concept, ~10× slower.
 
 ## Quickstart
 
@@ -165,8 +194,9 @@ LEFT/RIGHT within ±10–30 px over 10 steps in every test maze.
 
 ## Acknowledgments
 
+`nanogpt.py` is vendored verbatim from
+[nanoGPT](https://github.com/karpathy/nanoGPT) © Andrej Karpathy, MIT license.
 Data: [gen_dgrl](https://github.com/facebookresearch/gen_dgrl) (Mediratta et
 al., ICLR 2024), CC-BY-NC 4.0 — this repo's dataset re-host is likewise
 non-commercial. Architecture lineage: VQ-VAE (van den Oord et al. 2017), IRIS
-(Micheli et al. 2023), nanoGPT (Karpathy). Environment: procgen (Cobbe et al.
-2020). Code: MIT.
+(Micheli et al. 2023). Environment: procgen (Cobbe et al. 2020). Code: MIT.
