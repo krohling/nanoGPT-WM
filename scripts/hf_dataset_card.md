@@ -11,9 +11,9 @@ Frames were collected by PPO agents playing procgen **Chaser** at 64×64; this
 subset interleaves the release's expert and suboptimal variants 50/50 for
 state–action coverage.
 
-Made for **nano-world-model** — an educational, minimal action-conditioned
-world model (nanoGPT for world models). Non-commercial use only, per the
-upstream license.
+Made for **[nanoGPT-WM](https://github.com/krohling/nanoGPT-WM)** — an
+educational, minimal action-conditioned world model (nanoGPT for world
+models). Non-commercial use only, per the upstream license.
 
 ## Format (memmap-friendly flat binaries)
 

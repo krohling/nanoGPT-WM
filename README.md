@@ -83,8 +83,8 @@ the fast and slow paths sample *identical* frames. Skip it on first read;
 ## Quickstart
 
 ```bash
-git clone <REPO_URL>
-cd nano-world-model
+git clone https://github.com/krohling/nanoGPT-WM.git
+cd nanoGPT-WM
 pip install -r requirements.txt
 
 # fast path: pretrained checkpoints + held-out episodes (~100 MB total)
